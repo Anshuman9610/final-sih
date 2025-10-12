@@ -11,7 +11,7 @@ PROJECT_ID = "project-5ce21651-cf21-42e3-8ce"
 LOCATION = "us-central1"
 
 # --- Initialize Vertex AI client ---
-client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+client = genai.Client(api_key="AIzaSyBAdz-IdMaW53mTQ1wUqRLG5-A0CT9VeGY")
 
 class GeminiEmbeddings(Embeddings):
     """Custom LangChain-compatible wrapper for Gemini embeddings."""

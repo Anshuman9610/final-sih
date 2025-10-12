@@ -68,7 +68,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         content = await file.read()
         
         # Validate file size (max 10MB)
-        max_size = 10 * 1024 * 1024  # 10MB
+        max_size = 100* 1024 * 1024  # 10MB
         if len(content) > max_size:
             raise HTTPException(
                 status_code=400,
@@ -216,7 +216,7 @@ async def delete_pdf(pdf_id: str):
         if pdf_path in pdf_cache:
             del pdf_cache[pdf_path]
         
-        logger.info(f"🗑️ Deleted PDF: {pdf_id}")
+        logger.info(f"🗑 Deleted PDF: {pdf_id}")
         return {
             "message": f"✅ Deleted {pdf_id}",
             "pdf_id": pdf_id
@@ -245,5 +245,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port,
         reload=True,
-        log_level="info"
-    )
+        log_level="info")

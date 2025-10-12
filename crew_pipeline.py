@@ -2,13 +2,17 @@ import os
 import numpy as np
 import hashlib
 import time
+import re
 from functools import wraps
 from cachetools import LFUCache
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
 from BM25_INDEXER import prepare_bm25_index, bm25_search
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from pypdf import PdfReader
+
+# === UPDATED: Gemini Embeddings instead of HuggingFace ===
+from gemini_embedder import GeminiEmbeddings
 
 # === NEW IMPORTS FOR MEMORY ===
 from langchain.memory import ConversationBufferMemory
@@ -26,10 +30,8 @@ llm = ChatGroq(
     max_tokens=800,
 )
 
-# === Embeddings ===
-embedding_model = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-mpnet-base-v2",
-)
+# === Embeddings Setup (Gemini) ===
+embedding_model = GeminiEmbeddings(model_name="gemini-embedding-001")
 
 # === Caches ===
 pdf_cache = LFUCache(maxsize=10)     # Cache per-PDF indexes
@@ -54,7 +56,7 @@ class MemoryManager:
             self.sessions[session_id].clear()
             print(f"🧠 Memory cleared for session: {session_id}")
         else:
-            print(f"⚠️ No memory found for session: {session_id}")
+            print(f"⚠ No memory found for session: {session_id}")
 
 
 memory_manager = MemoryManager()
@@ -77,20 +79,67 @@ def cache_query(func):
     return wrapper
 
 
-# === PDF Loader ===
+# === NEW: Extract Section Number from Text ===
+def extract_section_number(text):
+    """
+    Extract section number from text using common patterns.
+    Supports formats like:
+    - Section 1.2.3
+    - Article 5
+    - Clause 3.4
+    - Chapter 2
+    - § 123
+    - 1.2.3 (standalone numbers at start)
+    """
+    patterns = [
+        r'(?:Section|SECTION|Sec\.|SEC\.)\s*(\d+(?:\.\d+)*)',
+        r'(?:Article|ARTICLE|Art\.|ART\.)\s*(\d+(?:\.\d+)*)',
+        r'(?:Clause|CLAUSE)\s*(\d+(?:\.\d+)*)',
+        r'(?:Chapter|CHAPTER|Ch\.|CH\.)\s*(\d+(?:\.\d+)*)',
+        r'(?:Rule|RULE)\s*(\d+(?:\.\d+)*)',
+        r'§\s*(\d+(?:\.\d+)*)',
+        r'^(\d+(?:\.\d+){1,3})\s+[A-Z]',  # Leading numbers like "1.2.3 Title"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text[:500])  # Check first 500 chars of each page
+        if match:
+            return match.group(1)
+    
+    return "N/A"
+
+
+# === UPDATED: PDF Loader with Section Detection ===
 def load_pdf_chunks(pdf_path):
-    from pypdf import PdfReader
+    """Load PDF with page and section metadata."""
     if not os.path.exists(pdf_path):
         print(f"❌ File not found: {pdf_path}")
         return []
 
     try:
         reader = PdfReader(pdf_path)
-        texts = [page.extract_text() or "" for page in reader.pages]
+        chunks = []
+        
+        for page_num, page in enumerate(reader.pages, start=1):
+            text = page.extract_text() or ""
+            if not text.strip():
+                continue
+            
+            # Extract section number from the page content
+            section = extract_section_number(text)
+            
+            # Store as dict with metadata
+            chunks.append({
+                "text": text,
+                "page": page_num,
+                "section": section
+            })
+        
+        return chunks
+        
     except Exception as e:
         print(f"❌ Error reading PDF: {e}")
         return []
-    return texts
 
 
 # === Helper: Truncate long passages ===
@@ -106,7 +155,7 @@ def truncate_passages(passages, max_total_tokens=3000):
     return truncated
 
 
-# === Get/Create Indexes ===
+# === UPDATED: Get/Create Indexes with Section Metadata ===
 def get_or_create_indexes(pdf_path):
     if pdf_path in pdf_cache:
         print(f"✅ Using cached indexes for {pdf_path}")
@@ -121,15 +170,31 @@ def get_or_create_indexes(pdf_path):
             persist_directory=persist_directory,
             embedding_function=embedding_model,
         )
-        texts = vectordb.get(include=["documents"])["documents"]
+        # Retrieve stored data with metadata
+        stored_data = vectordb.get(include=["documents", "metadatas"])
+        texts = stored_data["documents"]
+        metadatas = stored_data.get("metadatas", [])
+        
     else:
         print(f"⚡ Creating new indexes for {pdf_path}")
         chunks = load_pdf_chunks(pdf_path)
-        texts = [doc for doc in chunks if isinstance(doc, str)]
+        
+        # Separate texts and metadata
+        texts = [chunk["text"] for chunk in chunks]
+        metadatas = [
+            {
+                "page": chunk["page"],
+                "section": chunk["section"],
+                "source": os.path.basename(pdf_path)
+            }
+            for chunk in chunks
+        ]
 
+        # Create vectordb WITH metadata
         vectordb = Chroma.from_texts(
             texts,
             embedding_model,
+            metadatas=metadatas,
             persist_directory=persist_directory,
         )
 
@@ -143,6 +208,7 @@ def get_or_create_indexes(pdf_path):
     index_data = {
         "vectordb": vectordb,
         "texts": texts,
+        "metadatas": metadatas,  # Store metadata
         "doc_embeddings": doc_embeddings,
         "doc_norms": doc_norms,
     }
@@ -164,11 +230,12 @@ def local_rerank(query, texts, doc_embeddings, doc_norms, top_n=5):
     return [texts[i] for i in top_idx]
 
 
-# === Extract Relevant Text with Metadata ===
+# === UPDATED: Extract Relevant Text with Section Metadata ===
 def extract_relevant_clause(pdf_path, user_query, k=6):
     indexes = get_or_create_indexes(pdf_path)
     vectordb = indexes["vectordb"]
     texts = indexes["texts"]
+    stored_metadatas = indexes.get("metadatas", [])
     doc_embeddings = indexes["doc_embeddings"]
     doc_norms = indexes["doc_norms"]
 
@@ -178,21 +245,28 @@ def extract_relevant_clause(pdf_path, user_query, k=6):
     try:
         results = vectordb.similarity_search_with_score(user_query, k=20)
         semantic_passages = []
+        
         for doc, score in results:
-            if hasattr(doc, "metadata"):
+            # Extract metadata including section
+            if hasattr(doc, "metadata") and doc.metadata:
                 meta = doc.metadata
                 pdf_name = meta.get("source", os.path.basename(pdf_path))
                 page = meta.get("page", "Unknown")
+                section = meta.get("section", "N/A")
             else:
                 pdf_name = os.path.basename(pdf_path)
                 page = "Unknown"
+                section = "N/A"
+            
             metadata_results.append({
                 "content": doc.page_content,
                 "pdf_name": pdf_name,
                 "page": page,
+                "section": section,
                 "score": score
             })
             semantic_passages.append(doc.page_content)
+            
     except Exception as e:
         print("❌ Semantic search failed:", e)
         semantic_passages = []
@@ -223,6 +297,7 @@ def extract_relevant_clause(pdf_path, user_query, k=6):
 
     truncated_passages = truncate_passages(top_n_passages)
 
+    # Match metadata with sections
     matched_metadata = [
         m for m in metadata_results if m["content"] in truncated_passages
     ]
@@ -230,14 +305,16 @@ def extract_relevant_clause(pdf_path, user_query, k=6):
     return "\n\n".join(truncated_passages), matched_metadata
 
 
-# === Main Pipeline with Memory (FULLY INTEGRATED) ===
+# === UPDATED: Main Pipeline with Memory and Section Support ===
 @cache_query
 def run_full_pipeline(user_query: str, pdf_path: str, session_id="default"):
     context, metadata_info = extract_relevant_clause(pdf_path, user_query, k=10)
 
-    metadata_text = "\n".join(
-        [f"- Source: {m['pdf_name']}, Page: {m['page']}" for m in metadata_info]
-    ) or "No metadata available."
+    # Format metadata WITH section numbers
+    metadata_text = "\n".join([
+        f"- Source: {m['pdf_name']}, Page: {m['page']}, Section: {m['section']}"
+        for m in metadata_info
+    ]) or "No metadata available."
 
     # Get memory for session
     memory = memory_manager.get_memory(session_id)
@@ -261,12 +338,13 @@ Your role is to help officials quickly retrieve, compare, and interpret data, ru
 schemes, projects, and policies from multiple authentic documents.
 
 Objectives:
-1. Find all relevant information from provided contexts — even if scattered or overlapping.
+1. Find all relevant information from provided contexts – even if scattered or overlapping.
 2. Combine related clauses logically, avoid repetition, and highlight any conflicting info.
-3. Maintain traceability by citing document names and page numbers.
+3. Maintain traceability by citing document names, page numbers, AND section numbers when available.
 4. Always remain factual, concise, and policy-accurate.
 5. If data is insufficient or unclear, clearly state that instead of guessing.
 6. Use conversation history to provide contextual answers and maintain coherent dialogue.
+7. When citing sources, use format: "According to Section X.Y on Page Z..." or "As stated in Page Z, Section X.Y..."
 {history_text}
 
 User Query:
@@ -275,7 +353,7 @@ User Query:
 Retrieved Contexts:
 {context}
 
-Source Metadata:
+Source Metadata (cite these in your response):
 {metadata_text}
 """
 
@@ -290,10 +368,10 @@ Source Metadata:
     # Add AI response to memory
     memory.chat_memory.add_ai_message(llm_response.content)
 
-    # FIXED: Return metadata
+    # Return with metadata
     return {
-        "answer": llm_response.content,
-        "metadata": metadata_info
+        "answer": llm_response.content
+        
     }
 
 

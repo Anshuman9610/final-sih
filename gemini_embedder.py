@@ -2,7 +2,7 @@
 import os
 from typing import List
 import numpy as np
-from google import genai
+import google.generativeai as genai
 from google.genai.types import EmbedContentConfig
 from langchain_core.embeddings import Embeddings
 

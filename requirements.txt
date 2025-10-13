@@ -12,5 +12,4 @@ requests==2.32.3
 typing-extensions==4.12.2
 cachetools==5.3.3
 langchain_groq
-sentence-transformers
-transformers
+langchain-google-genai==1.0.10

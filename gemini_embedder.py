@@ -3,7 +3,6 @@ import os
 from typing import List
 import numpy as np
 import google.generativeai as genai
-from google.genai.types import EmbedContentConfig
 from langchain_core.embeddings import Embeddings
 
 # --- Config ---
@@ -11,7 +10,7 @@ PROJECT_ID = "project-5ce21651-cf21-42e3-8ce"
 LOCATION = "us-central1"
 
 # --- Initialize Vertex AI client ---
-client = genai.Client(api_key="AIzaSyBAdz-IdMaW53mTQ1wUqRLG5-A0CT9VeGY")
+client = genai.Client(api_key="GOOGLE_API_KEY")
 
 class GeminiEmbeddings(Embeddings):
     """Custom LangChain-compatible wrapper for Gemini embeddings."""

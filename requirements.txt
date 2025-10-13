@@ -13,3 +13,6 @@ typing-extensions==4.12.2
 cachetools==5.3.3
 langchain_groq
 langchain-google-genai==1.0.10
+google-genai
+pydantic
+pydantic-core

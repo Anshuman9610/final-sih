@@ -31,7 +31,7 @@ llm = ChatGroq(
 )
 
 # === Embeddings Setup (Gemini) ===
-embedding_model = GeminiEmbeddings(model_name="gemini-embedding-001")
+embedding_model = GeminiEmbeddings(model_name="models/embedding-001")
 
 # === Caches ===
 pdf_cache = LFUCache(maxsize=10)     # Cache per-PDF indexes
